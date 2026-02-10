@@ -33,6 +33,191 @@ def load_students():
 
     return encodings, info
 
+attendance_memory = {}
+attendance_start_time = time.time()
+camera_subjects = {}
+csv_files = {}
+csv_writers = {}
+csv_initialized = False
+
+
+def init_normal_mode(cfgs):
+    """Runs once when hybrid starts"""
+    global camera_subjects, csv_files, csv_writers, csv_initialized
+
+    if csv_initialized:
+        return
+
+    os.makedirs("attendance", exist_ok=True)
+    session_time = datetime.now().strftime("%I%p")
+
+    print("\n📘 SUBJECT ASSIGNMENT\n")
+
+    for cam_id, cfg in cfgs.items():
+        classroom = cfg["classroom"]
+
+        subject = input(
+            f"Enter subject for {classroom} (Cam {cam_id}): "
+        ).strip()
+
+        camera_subjects[cam_id] = subject
+
+        path = f"attendance/{classroom}_{subject}_{session_time}.csv"
+
+        f = open(path, "w", newline="", encoding="utf-8")
+        writer = csv.writer(f)
+
+        writer.writerow([
+            "USN", "Name", "Subject",
+            "Class", "Time", "Camera ID"
+        ])
+
+        csv_files[cam_id] = f
+        csv_writers[cam_id] = writer
+        attendance_memory[cam_id] = set()
+
+    csv_initialized = True
+
+
+def process_normal_frame(frame, cam_id, cfg):
+    global attendance_start_time
+
+    init_normal_mode({cam_id: cfg})
+
+    classroom = cfg["classroom"]
+    subject = camera_subjects[cam_id]
+
+    known_encodings, student_info = load_students()
+
+    small = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+    rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+
+    locations = face_recognition.face_locations(rgb)
+    encodings = face_recognition.face_encodings(rgb, locations)
+
+    attendance_active = (
+        time.time() - attendance_start_time < ATTENDANCE_DURATION
+    )
+
+    for (top, right, bottom, left), enc in zip(locations, encodings):
+
+        distances = face_recognition.face_distance(
+            known_encodings, enc
+        )
+
+        student = None
+        if len(distances):
+            idx = np.argmin(distances)
+            if distances[idx] < 0.45:
+                student = student_info[idx]
+
+        top *= 2
+        right *= 2
+        bottom *= 2
+        left *= 2
+
+        # -------- Attendance --------
+        if attendance_active and student:
+            usn = student["usn"]
+
+            if (
+                usn not in attendance_memory[cam_id]
+                and student["classroom"] == classroom
+            ):
+                attendance_memory[cam_id].add(usn)
+
+                now = datetime.now()
+
+                attendance_col.insert_one({
+                    "usn": usn,
+                    "name": student["name"],
+                    "class": classroom,
+                    "subject": subject,
+                    "camera_id": cam_id,
+                    "time": now,
+                    "mode": "Hybrid-Normal"
+                })
+
+                csv_writers[cam_id].writerow([
+                    usn,
+                    student["name"],
+                    subject,
+                    classroom,
+                    now.strftime("%d-%m-%Y %H:%M:%S"),
+                    cam_id
+                ])
+
+                csv_files[cam_id].flush()
+
+                print(f"✅ Attendance → {student['name']}")
+
+        # -------- Discipline --------
+        if not attendance_active and student:
+
+            phone_found = detect_phone(frame, student, cam_id)
+
+            if phone_found:
+                os.makedirs("evidence/phone", exist_ok=True)
+
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                img_path = f"evidence/phone/{student['usn']}_{ts}.jpg"
+
+                cv2.imwrite(img_path, frame)
+
+                violations_col.insert_one({
+                    "usn": student["usn"],
+                    "name": student["name"],
+                    "class": classroom,
+                    "branch": student["branch"],
+                    "violation": "Phone Usage",
+                    "camera_id": cam_id,
+                    "time": datetime.now(),
+                    "mode": "Hybrid-Normal",
+                    "evidence": img_path
+                })
+
+                send_email_alert(
+                    student=student,
+                    violation="Phone Usage",
+                    image_path=img_path,
+                    cam_id=cam_id
+                )
+
+                cv2.putText(frame,
+                            "🚨 PHONE DETECTED",
+                            (left, bottom + 30),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            (0, 0, 255),
+                            2)
+
+        # -------- Draw --------
+        label = (
+            f"{student['name']} ({student['usn']})"
+            if student else "Unknown"
+        )
+
+        color = (0, 255, 0) if student else (0, 0, 255)
+
+        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+        cv2.putText(frame, label,
+                    (left, top - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, color, 2)
+
+    status = "ATTENDANCE" if attendance_active else "DISCIPLINE MODE"
+
+    cv2.putText(frame,
+                f"{classroom} | {status}",
+                (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 0),
+                2)
+
+    return frame
+
+
 
 # ---------------- NORMAL MODE ---------------- #
 def start_normal_mode_multi():

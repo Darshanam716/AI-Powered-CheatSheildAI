@@ -33,6 +33,134 @@ def load_students():
 
     return encodings, info
 
+# ---------------- FRAME PROCESSOR (HYBRID MODE) ---------------- #
+def process_exam_frame(frame, cam_id, cfg):
+    hall = cfg.get("hall", f"Hall-{cam_id}")
+
+    known_encodings, student_info = load_students()
+
+    small = cv2.resize(frame, (0, 0), fx=FRAME_SCALE, fy=FRAME_SCALE)
+    rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+
+    locations = face_recognition.face_locations(rgb, model="hog")
+    encodings = face_recognition.face_encodings(rgb, locations)
+
+    unknown_face = False
+    detected_students = []
+
+    talking_detected_any = False
+    side_look_detected_any = False
+
+    # -------- FACE LOOP --------
+    for (top, right, bottom, left), enc in zip(locations, encodings):
+
+        distances = face_recognition.face_distance(
+            known_encodings, enc
+        )
+
+        student = None
+        if len(distances):
+            idx = np.argmin(distances)
+            if distances[idx] < FACE_THRESHOLD:
+                student = student_info[idx]
+
+        # scale back
+        top = int(top / FRAME_SCALE)
+        right = int(right / FRAME_SCALE)
+        bottom = int(bottom / FRAME_SCALE)
+        left = int(left / FRAME_SCALE)
+
+        face_box = (top, right, bottom, left)
+        face_id = (top // 40, left // 40)
+
+        # -------- TALKING --------
+        talking = detect_talking(frame, face_box, face_id)
+        if talking:
+            talking_detected_any = True
+            cv2.putText(frame,
+                        "TALKING",
+                        (left, bottom + 25),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 0, 255),
+                        2)
+
+        # -------- SIDE LOOK --------
+        side_look = detect_side_look(face_box, face_id)
+        if side_look:
+            side_look_detected_any = True
+            cv2.putText(frame,
+                        "SIDE LOOK",
+                        (left, bottom + 45),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 0, 255),
+                        2)
+
+        # -------- LABEL --------
+        if student:
+            detected_students.append(student)
+            label = f"{student['name']} ({student['usn']})"
+            color = (0, 255, 0)
+        else:
+            unknown_face = True
+            label = "UNKNOWN"
+            color = (0, 0, 255)
+
+        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+        cv2.putText(frame,
+                    label,
+                    (left, top - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    color,
+                    2)
+
+    # -------- PHONE DETECTION --------
+    phone_detected = False
+    if locations:
+        phone_detected = detect_phone(frame, None, cam_id)
+
+    # -------- CHEATING LOGIC --------
+    is_cheating, violation = detect_exam_cheating(
+        phone_detected=phone_detected,
+        unknown_face=unknown_face,
+        talking=talking_detected_any,
+        side_look=side_look_detected_any
+    )
+
+    # -------- ALERT + EVIDENCE --------
+    now = time.time()
+    last = last_alert_time.get(cam_id, 0)
+
+    if is_cheating and now - last > ALERT_COOLDOWN:
+
+        s = detected_students[0] if detected_students else None
+
+        save_and_alert(
+            frame,
+            cam_id,
+            violation,
+            {
+                "usn": s["usn"] if s else "UNKNOWN",
+                "name": s["name"] if s else "UNKNOWN",
+                "hall": hall
+            }
+        )
+
+        last_alert_time[cam_id] = now
+
+    # -------- STATUS BAR --------
+    cv2.putText(frame,
+                f"EXAM MODE | {hall} | Faces: {len(locations)}",
+                (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2)
+
+    return frame
+
 
 # ---------------- EXAM MODE ---------------- #
 def start_exam_mode():

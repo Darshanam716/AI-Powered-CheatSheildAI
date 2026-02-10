@@ -14,7 +14,7 @@ CAMERA_CONFIG = {
     }
 }
 """
-
+"""
     #  Example exam camera (future-ready)
 CAMERA_CONFIG = {
      0: {
@@ -27,4 +27,18 @@ CAMERA_CONFIG = {
          "hall": "Exam Hall 2",
          "expected_branch": "IS"
      },
+}
+
+"""
+CAMERA_CONFIG = {
+    0: {  # Laptop camera
+        "mode": "normal",
+        "classroom": "CS-5A",
+        "section": "A"
+    },
+
+    1: {  # External webcam
+        "mode": "exam",
+        "hall": "Exam Hall 1"
+    }
 }
